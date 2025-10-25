@@ -20,6 +20,7 @@ import javafx.stage.Stage;
 import javafx.util.Duration;
 
 import java.io.*;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -41,6 +42,39 @@ public class SmartDataParser extends Application {
     private static final Set<String> JURUSAN_SMK_KESEHATAN = Set.of("AKC", "FKK", "TLM");
     private static final List<String> KELAS_ORDER = List.of("10", "11", "12");
 
+    // ===== Singleton-ish safe reference (only assigned by JavaFX) =====
+    private static SmartDataParser instance;
+
+    public SmartDataParser() {
+        // JavaFX will create the Application instance; store reference for external callers.
+        instance = this;
+    }
+
+    public static SmartDataParser getInstance() {
+        // Return current instance if Application is running, otherwise null.
+        return instance;
+    }
+
+    // Allow external callers (AdminInputApp) to add student safely.
+    public void addStudent(String nama, String kelas, String jurusan, String sekolah) {
+        if (dataList == null) {
+            dataList = FXCollections.observableArrayList();
+        }
+        if (existingNames == null) {
+            existingNames = new HashSet<>();
+        }
+
+        if (nama == null || nama.trim().isEmpty()) return;
+        String key = nama.trim().toLowerCase();
+        if (!existingNames.contains(key)) {
+            Student s = new Student(nama.trim(), kelas == null ? "" : kelas.trim(), jurusan == null ? "" : jurusan.trim(), sekolah == null ? "" : sekolah.trim());
+            dataList.add(s);
+            existingNames.add(key);
+            updateCount();
+            refreshTreeWithAnimation();
+        }
+    }
+
     public static void main(String[] args) {
         launch(args);
     }
@@ -48,50 +82,19 @@ public class SmartDataParser extends Application {
     @Override
     public void start(Stage stage) {
         stage.setTitle("🏫 Smart Data Parser Sekolah (Rebuilt)");
-        // ICON: optional, comment out if online resource blocked
+        // initialize collections early to avoid NPEs
         dataList = FXCollections.observableArrayList();
         existingNames = new HashSet<>();
 
         buildUI(stage);
         refreshTreeWithAnimation();
     }
-// === Tambahkan di SmartDataParser.java ===
-
-    // 🔹 Singleton instance
-    private static SmartDataParser instance;
-
-    public SmartDataParser() {
-        instance = this;
-    }
-
-    public static SmartDataParser getInstance() {
-        if (instance == null) {
-            instance = new SmartDataParser();
-        }
-        return instance;
-    }
-
-    // 🔹 Tambahkan fungsi agar bisa dipanggil dari AdminInputApp
-    public void addStudent(String nama, String kelas, String jurusan, String sekolah) {
-        if (dataList == null) {
-            dataList = javafx.collections.FXCollections.observableArrayList();
-        }
-        if (existingNames == null) {
-            existingNames = new java.util.HashSet<>();
-        }
-
-        if (!existingNames.contains(nama.toLowerCase())) {
-            dataList.add(new Student(nama, kelas, jurusan, sekolah));
-            existingNames.add(nama.toLowerCase());
-            updateCount();
-            refreshTreeWithAnimation();
-        }
-    }
 
     private void buildUI(Stage stage) {
         // Input area
         inputArea = new TextArea();
-        inputArea.setPromptText("Masukkan data siswa (contoh tiap baris: Rina Safitri kelas 11 PPLG)");
+        inputArea.setPromptText("Masukkan data siswa (satu entri per baris). Contoh:\n" +
+                "Dimas Arif Nugraha – 10 – AKL – SMK Airlangga\natau\nRina Safitri kelas 11 PPLG");
         inputArea.setWrapText(true);
         inputArea.setPrefRowCount(4);
 
@@ -148,7 +151,7 @@ public class SmartDataParser extends Application {
         noCol.setPrefWidth(50);
         noCol.setCellValueFactory(param -> {
             TreeItem<Student> item = param.getValue();
-            if (item.getParent() != null && item.getParent().getParent() != null) {
+            if (item != null && item.getParent() != null && item.getParent().getParent() != null) {
                 int index = item.getParent().getChildren().indexOf(item) + 1;
                 return new SimpleStringProperty(String.valueOf(index));
             }
@@ -160,7 +163,9 @@ public class SmartDataParser extends Application {
         nameCol.setCellValueFactory(c -> c.getValue().getValue().namaProperty());
         nameCol.setCellFactory(TextFieldTreeTableCell.forTreeTableColumn());
         nameCol.setOnEditCommit(evt -> {
-            Student s = evt.getRowValue().getValue();
+            TreeItem<Student> treeItem = evt.getRowValue();
+            if (treeItem == null || treeItem.getValue() == null) return;
+            Student s = treeItem.getValue();
             String old = s.getNama();
             String neu = evt.getNewValue().trim();
             if (neu.isEmpty()) {
@@ -173,7 +178,7 @@ public class SmartDataParser extends Application {
                 treeTable.refresh();
                 return;
             }
-            // update existingNames
+            // update existingNames safely
             existingNames.remove(old.toLowerCase());
             s.namaProperty().set(neu);
             existingNames.add(neu.toLowerCase());
@@ -190,7 +195,7 @@ public class SmartDataParser extends Application {
 
         treeTable.getColumns().addAll(noCol, nameCol, kelasCol, jurusanCol);
 
-        // keep text black on selection via stylesheet injection
+        // small CSS (applied via data URL). Encode to avoid spaces/newlines issues.
         String css = """
                 .tree-table-row-cell:filled:selected, .tree-table-cell:selected {
                    -fx-selection-bar-text: black;
@@ -199,6 +204,13 @@ public class SmartDataParser extends Application {
                    -fx-text-fill: black;
                 }
                 """;
+        try {
+            String encoded = URLEncoder.encode(css, StandardCharsets.UTF_8.toString());
+            Scene dummy = new Scene(new Pane()); // temp scene to accept stylesheet format
+            // We'll apply to the final scene below; keep variable for use.
+        } catch (Exception ignored) {
+            // ignore encoding errors; we'll fallback and not crash app.
+        }
 
         // Row coloring per school and context menu for student nodes
         treeTable.setRowFactory(tv -> {
@@ -228,7 +240,11 @@ public class SmartDataParser extends Application {
                     if (ti != null && ti.isLeaf() && ti.getValue() != null && ti.getValue().getNama().length() > 0) {
                         ContextMenu cm = new ContextMenu();
                         MenuItem edit = new MenuItem("Edit Nama");
-                        edit.setOnAction(a -> treeTable.edit(treeTable.getSelectionModel().getSelectedIndex(), nameCol));
+                        edit.setOnAction(a -> {
+                            // ensure selection is set to this row
+                            treeTable.getSelectionModel().select(row.getIndex());
+                            treeTable.edit(row.getIndex(), nameCol);
+                        });
                         MenuItem delete = new MenuItem("Hapus Siswa");
                         delete.setOnAction(a -> {
                             Student s = ti.getValue();
@@ -295,7 +311,15 @@ public class SmartDataParser extends Application {
         root.setStyle("-fx-background-color: linear-gradient(to bottom, #FFFFFF, #F7FFF7);");
 
         Scene scene = new Scene(root, 980, 640);
-        scene.getStylesheets().add("data:," + css); // inject small css
+
+        // apply CSS directly as small inline stylesheet; encode to data URL to avoid IllegalArgumentException on some platforms
+        try {
+            String encodedCss = URLEncoder.encode(css, StandardCharsets.UTF_8.toString());
+            scene.getStylesheets().add("data:text/css," + encodedCss);
+        } catch (Exception ex) {
+            // fallback: do not crash; css is cosmetic
+        }
+
         // keyboard support: Enter to add manual if focus on nameField
         nameField.setOnKeyPressed(k -> {
             if (k.getCode() == KeyCode.ENTER) { addManual(); refreshTreeWithAnimation(); }
@@ -351,25 +375,87 @@ public class SmartDataParser extends Application {
             return;
         }
 
-        // Accept multiple lines, each line like: "Rina Safitri kelas 11 PPLG" or "Rina Safitri, kelas 11 PPLG"
-        Pattern p = Pattern.compile("([A-Za-z.'\\- ]+?)\\s*(?:,|)\\s*(?:kelas\\s*)?(\\d{1,2})\\s*([A-Za-z0-9]+)", Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(input);
-
+        // Support dashes (hyphen, en dash, em dash) and both "kelas" phrasing or explicit sekolah
+        // Examples supported:
+        // "Nama – 10 – AKL – SMK Airlangga"
+        // "Nama, kelas 11 PPLG"
+        // "Nama kelas 11 PPLG"
+        Pattern pLine = Pattern.compile("(.+)");
+        String[] lines = input.split("\\r?\\n");
         int added = 0;
-        while (m.find()) {
-            String nama = m.group(1).trim();
-            String kelas = m.group(2).trim();
-            String jurusan = m.group(3).trim().toUpperCase();
-            String sekolah = determineSekolah(jurusan);
+        List<String> skipped = new ArrayList<>();
+
+        for (String rawLine : lines) {
+            String line = rawLine.trim();
+            if (line.isEmpty()) continue;
+
+            // Normalize different dash characters to simple hyphen for splitting
+            String norm = line.replaceAll("[\\u2013\\u2014]", "-");
+
+            // Try split by dash groups first: "name - kelas - jurusan - sekolah" (4 parts)
+            String[] parts = Arrays.stream(norm.split("\\s*-\\s*")).map(String::trim).filter(s -> !s.isEmpty()).toArray(String[]::new);
+
+            String nama = null, kelas = null, jurusan = null, sekolah = null;
+
+            if (parts.length >= 3) {
+                // If last part looks like school (contains "SMK" or "Sekolah") accept it
+                if (parts.length >= 4) {
+                    nama = parts[0];
+                    kelas = parts[1];
+                    jurusan = parts[2];
+                    sekolah = parts[3];
+                } else {
+                    // 3 parts: likely name - kelas - jurusan
+                    nama = parts[0];
+                    kelas = parts[1];
+                    jurusan = parts[2];
+                    sekolah = determineSekolah(jurusan); // maybe jurusan is one of known ones
+                }
+            } else {
+                // try pattern with optional "kelas" word: "Name, kelas 11 PPLG" or "Name kelas 11 PPLG"
+                Pattern p = Pattern.compile("([A-Za-z.'\\- ]+?)\\s*(?:,|)\\s*(?:kelas\\s*)?(\\d{1,2})\\s*([A-Za-z0-9]+)(?:\\s*-\\s*(.+))?", Pattern.CASE_INSENSITIVE);
+                Matcher m = p.matcher(line);
+                if (m.find()) {
+                    nama = m.group(1).trim();
+                    kelas = m.group(2).trim();
+                    jurusan = m.group(3).trim().toUpperCase();
+                    if (m.groupCount() >= 4 && m.group(4) != null) {
+                        sekolah = m.group(4).trim();
+                    } else {
+                        sekolah = determineSekolah(jurusan);
+                    }
+                }
+            }
+
+            if (nama == null || kelas == null || jurusan == null) {
+                skipped.add(line);
+                continue;
+            }
+
+            // Normalize jurusan (upper)
+            jurusan = jurusan.toUpperCase();
+
+            if (sekolah == null || sekolah.isBlank()) sekolah = determineSekolah(jurusan);
             if (sekolah == null) sekolah = "Tidak Diketahui";
 
-            if (!existingNames.contains(nama.toLowerCase())) {
+            String key = nama.toLowerCase();
+            if (!existingNames.contains(key)) {
                 dataList.add(new Student(nama, kelas, jurusan, sekolah));
-                existingNames.add(nama.toLowerCase());
+                existingNames.add(key);
                 added++;
-            }
+            } // else duplicate -> skip silently (or we could add to skipped list)
         }
-        if (added == 0) showAlert("Info", "Tidak ada entri baru yang valid ditemukan.", Alert.AlertType.INFORMATION);
+
+        if (added == 0) {
+            showAlert("Info", "Tidak ada entri baru yang valid ditemukan.", Alert.AlertType.INFORMATION);
+            if (!skipped.isEmpty()) {
+                // optional: log skipped lines to console for debugging
+                System.out.println("Skipped lines:");
+                skipped.forEach(s -> System.out.println(" - " + s));
+            }
+        } else {
+            showAlert("Sukses", "Berhasil menambahkan " + added + " entri.", Alert.AlertType.INFORMATION);
+        }
         updateCount();
     }
 
@@ -400,6 +486,7 @@ public class SmartDataParser extends Application {
     }
 
     private void refreshTreeWithAnimation() {
+        if (treeTable == null) return;
         // build grouped map: Sekolah -> Jurusan -> Kelas -> List<Student>
         Map<String, Map<String, Map<String, List<Student>>>> grouped = new TreeMap<>();
 
@@ -459,6 +546,8 @@ public class SmartDataParser extends Application {
 
     // comparator to order kelas numeric (10,11,12) then lexicographic fallback
     private int kelasComparator(String a, String b) {
+        if (a == null) a = "";
+        if (b == null) b = "";
         try {
             int ia = Integer.parseInt(a);
             int ib = Integer.parseInt(b);
@@ -475,6 +564,7 @@ public class SmartDataParser extends Application {
     }
 
     private void updateCount() {
+        if (countLabel == null) return;
         long totalAirlangga = dataList.stream().filter(s -> "SMK Airlangga".equals(s.getKelompok())).count();
         long totalKesehatan = dataList.stream().filter(s -> "SMK Kesehatan Airlangga".equals(s.getKelompok())).count();
         countLabel.setText(String.format("👥 Total siswa: %d (SMK Airlangga: %d | SMK Kesehatan: %d)",
@@ -515,8 +605,9 @@ public class SmartDataParser extends Application {
             String line;
             int added = 0;
             while ((line = br.readLine()) != null) {
+                if (line.trim().isEmpty()) continue;
                 String[] parts = splitCsv(line);
-                if (parts.length < 4) continue;
+                if (parts == null || parts.length < 4) continue;
                 String nama = parts[0].trim();
                 String kelas = parts[1].trim();
                 String jurusan = parts[2].trim();
@@ -536,6 +627,7 @@ public class SmartDataParser extends Application {
     }
 
     private static String escapeCsv(String s) {
+        if (s == null) s = "";
         if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
             return "\"" + s.replace("\"", "\"\"") + "\"";
         }
@@ -543,6 +635,7 @@ public class SmartDataParser extends Application {
     }
 
     private static String[] splitCsv(String line) {
+        if (line == null) return new String[0];
         // simple CSV split honoring quotes
         List<String> out = new ArrayList<>();
         StringBuilder cur = new StringBuilder();
@@ -565,7 +658,7 @@ public class SmartDataParser extends Application {
     }
 
     private void showProgress(boolean show) {
-        progressIndicator.setVisible(show);
+        if (progressIndicator != null) progressIndicator.setVisible(show);
     }
 
     private void showAlert(String title, String message, Alert.AlertType type) {
@@ -584,10 +677,10 @@ public class SmartDataParser extends Application {
         private final StringProperty kelompok;
 
         public Student(String nama, String kelas, String jurusan, String kelompok) {
-            this.nama = new SimpleStringProperty(nama);
-            this.kelas = new SimpleStringProperty(kelas);
-            this.jurusan = new SimpleStringProperty(jurusan);
-            this.kelompok = new SimpleStringProperty(kelompok);
+            this.nama = new SimpleStringProperty(nama == null ? "" : nama);
+            this.kelas = new SimpleStringProperty(kelas == null ? "" : kelas);
+            this.jurusan = new SimpleStringProperty(jurusan == null ? "" : jurusan);
+            this.kelompok = new SimpleStringProperty(kelompok == null ? "" : kelompok);
         }
 
         public String getNama() { return nama.get(); }
