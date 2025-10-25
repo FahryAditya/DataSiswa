@@ -35,7 +35,7 @@ public class LoginApp extends Application {
             String user = tfUser.getText().trim();
             String pass = pfPass.getText().trim();
 
-            if (user.equals("admin") && pass.equals("admin123")) {
+            if (user.equals("smkairlanggadb") && pass.equals("AIRLANGGADATA1123")) {
                 new AdminInputApp().start(new Stage());
                 stage.close();
             } else {
