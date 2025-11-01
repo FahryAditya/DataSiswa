@@ -37,9 +37,10 @@ const Color kKesehatanColor = Color(0xFF4CAF50); // Hijau Muda
 const String airlangga = 'SMK Airlangga';
 const String kesehatan = 'SMK Kesehatan Airlangga';
 
+/// NOTE: pastikan tidak ada leading/trailing space pada nama jurusan
 const Map<String, List<String>> kJurusanBySekolah = {
-  airlangga: ['PPLG', 'AKL', 'TKR'],
-  kesehatan: ['FKK', 'MP', 'OTKP'],
+  airlangga: ['PPLG', 'AKL', 'MPLB', 'TJKT', 'DKV'],
+  kesehatan: ['FKK', 'AKC', 'TLM', ], // jika ada jurusan overlapping, sesuaikan prioritas
 };
 
 const List<String> kKelas = ['10', '11', '12'];
@@ -61,7 +62,7 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         primarySwatch: Colors.green,
-        textTheme: GoogleFonts.poppinsTextTheme(Theme.of(context).textTheme),
+        textTheme: GoogleFonts.poppinsTextTheme(),
         scaffoldBackgroundColor: kBackgroundColor,
       ),
       home: const DataParserScreen(),
@@ -112,7 +113,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
       duration: const Duration(milliseconds: 700),
     );
 
-    // FIX: Menggunakan AnimationController yang terpisah dari widget utama
     _entranceController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
@@ -126,7 +126,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
     ));
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_entranceController);
 
-    // Inisialisasi controller refresh
     _refreshFeedbackController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
@@ -157,19 +156,26 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
     return File('$path/$_filename');
   }
 
-  /// Memuat data dari file lokal ke memori. (FIXED: Handling file kosong)
+  /// Memuat data dari file lokal ke memori. (Handling file tidak ada/kosong)
   Future<void> _loadData() async {
     try {
       final file = await _localFile;
+      if (!await file.exists()) {
+        // file belum ada -> pastikan kosong
+        setState(() {
+          _studentData = [];
+          _updateStatistics();
+        });
+        _entranceController.forward(from: 0.0);
+        return;
+      }
+
       String contents = await file.readAsString();
-      
-      // FIX: Cek jika file kosong atau hanya whitespace
       if (contents.trim().isEmpty) {
         setState(() {
           _studentData = [];
           _updateStatistics();
         });
-        // Jalankan animasi entrance setelah load/cek data
         _entranceController.forward(from: 0.0);
         return;
       }
@@ -184,21 +190,20 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
         _updateStatistics();
       });
       
-      // Jalankan animasi entrance setelah load/cek data
       _entranceController.forward(from: 0.0);
-      
-      // Visual feedback setelah refresh
       _refreshFeedbackController.forward(from: 0.0).then((_) {
         _refreshFeedbackController.reverse();
       });
       
     } catch (e) {
-      print('Gagal memuat data: $e');
+      // Tampilkan pesan user-friendly
+      _showErrorSnackbar('Gagal memuat data (cek izin file atau format).');
       setState(() {
         _studentData = [];
         _updateStatistics();
       });
       _entranceController.forward(from: 0.0);
+      print('Gagal memuat data: $e');
     }
   }
 
@@ -207,74 +212,109 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
       final file = await _localFile;
       final List<Map<String, dynamic>> jsonList =
           _studentData.map((s) => s.toJson()).toList();
+
+      // Jika tidak ada data, beri peringatan
+      if (jsonList.isEmpty) {
+        _showErrorSnackbar('Tidak ada data untuk disimpan.');
+        return;
+      }
+
       await file.writeAsString(jsonEncode(jsonList));
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Data berhasil disimpan ke lokal!')),
       );
+    } on FileSystemException catch (e) {
+      _showErrorSnackbar('Gagal menyimpan data: masalah akses file.');
+      print('FileSystemException: $e');
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Gagal menyimpan data: $e')),
-      );
+      _showErrorSnackbar('Terjadi kesalahan saat menyimpan data.');
+      print('Unexpected save error: $e');
     }
   }
 
-  /// Memproses Input Otomatis (FIXED: Regex, setState, dan Logic)
+  /// Cari sekolah berdasarkan jurusan (case-insensitive, trimming)
+  String? _findSekolahForJurusan(String jurusanInput) {
+    final jur = jurusanInput.trim().toUpperCase();
+    // Cek setiap sekolah; jika ada overlap di dua sekolah, prioritas sesuai urutan map
+    for (var entry in kJurusanBySekolah.entries) {
+      if (entry.value.map((e) => e.toUpperCase()).contains(jur)) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  /// Memproses Input Otomatis (mendukung multi-line -> multiple matches)
   void _processAutomaticInput() async {
     if (_isProcessing) return;
     
     final text = _autoInputController.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty) {
+      _showErrorSnackbar('Masukkan teks untuk diproses.');
+      return;
+    }
 
     setState(() { _isProcessing = true; });
     _processButtonController.repeat();
 
-    await Future.delayed(const Duration(milliseconds: 1500));
+    // tunggu sejenak agar animasi terlihat
+    await Future.delayed(const Duration(milliseconds: 500));
 
-    // FIX: Perbaikan Regex untuk menerima nama dengan karakter tambahan dan spasi
-    // Pola: Nama (huruf, angka, spasi, titik, dll) kelas Kelas Jurusan (huruf)
+    // Regex: capture "Nama ... kelas 10|11|12 JURUSAN"
     final regex = RegExp(
-      r'([\w\s.\-]+)\s+kelas\s+(10|11|12)\s+([\w]+)',
+      r'([\w\s.\-]+?)\s+kelas\s+(10|11|12)\s+([A-Za-z0-9]+)',
       caseSensitive: false,
+      multiLine: true,
     );
-    final match = regex.firstMatch(text);
 
-    if (match != null) {
+    final matches = regex.allMatches(text).toList();
+    if (matches.isEmpty) {
+      _showErrorSnackbar('Format input tidak valid. Gunakan: [Nama] kelas [10/11/12] [Jurusan]');
+      _processButtonController.stop();
+      setState(() { _isProcessing = false; });
+      return;
+    }
+
+    int added = 0;
+    int unknownJurusan = 0;
+
+    for (final match in matches) {
       final nama = match.group(1)!.trim();
       final kelas = match.group(2)!.trim();
       final jurusan = match.group(3)!.toUpperCase().trim();
-      String? sekolah;
 
-      if (kJurusanBySekolah[airlangga]!.contains(jurusan)) {
-        sekolah = airlangga;
-      } else if (kJurusanBySekolah[kesehatan]!.contains(jurusan)) {
-        sekolah = kesehatan;
-      }
+      final sekolah = _findSekolahForJurusan(jurusan);
 
       if (sekolah != null) {
         final newStudent = Student(nama: nama, kelas: kelas, jurusan: jurusan, sekolah: sekolah);
-        
-        // FIX: setState dimasukkan untuk merefresh UI
         setState(() {
           _studentData.add(newStudent);
-          _autoInputController.clear();
-          _updateStatistics();
-          // _getGroupedData() akan otomatis terpanggil di build()
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Siswa ${newStudent.nama} berhasil ditambahkan!')),
-        );
+        added++;
       } else {
-        _showErrorSnackbar('Jurusan ($jurusan) tidak dikenali.');
+        unknownJurusan++;
+        // jangan break — teruskan untuk yang lain
       }
-    } else {
-      _showErrorSnackbar('Format input tidak valid. Coba: [Nama] kelas [Kelas] [Jurusan]');
     }
+
+    // clear input jika ada penambahan
+    if (added > 0) _autoInputController.clear();
+    _updateStatistics();
 
     _processButtonController.stop();
     setState(() { _isProcessing = false; });
+
+    if (added > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Berhasil menambahkan $added siswa.')),
+      );
+    }
+    if (unknownJurusan > 0) {
+      _showErrorSnackbar('$unknownJurusan baris memiliki jurusan yang tidak dikenali.');
+    }
   }
 
-  /// Menambah data siswa dari Input Manual (FIXED: setState)
+  /// Menambah data siswa dari Input Manual
   void _addManualInput() {
     if (_manualNamaController.text.isEmpty || _selectedSekolah == null || _selectedJurusan == null || _selectedKelas == null) {
       _showErrorSnackbar('Semua kolom manual harus diisi.');
@@ -288,7 +328,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
       sekolah: _selectedSekolah!,
     );
 
-    // FIX: setState dimasukkan untuk merefresh UI
     setState(() {
       _studentData.add(newStudent);
       _manualNamaController.clear();
@@ -296,7 +335,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
       _selectedJurusan = null;
       _selectedKelas = null;
       _updateStatistics();
-      // _getGroupedData() akan otomatis terpanggil di build()
     });
     
     ScaffoldMessenger.of(context).showSnackBar(
@@ -305,7 +343,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
   }
 
   void _clearAllData() async {
-    // ... (Logika Clear Data)
     bool confirm = await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -362,11 +399,10 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
     return grouped;
   }
 
-  // --- 5. UI WIDGETS DENGAN ANIMASI (FIXED: Pemindahan Transisi) ---
+  // --- 5. UI WIDGETS DENGAN ANIMASI ---
 
   @override
   Widget build(BuildContext context) {
-    // FIX: _getGroupedData() dipanggil di sini, sehingga selalu baru setelah setState
     final groupedData = _getGroupedData();
 
     return Scaffold(
@@ -378,8 +414,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
         backgroundColor: kBackgroundColor,
         elevation: 0,
       ),
-      // FIX: Pindahkan FadeTransition & SlideTransition HANYA membungkus SingleChildScrollView (Konten),
-      // agar Scaffold (AppBar, FAB, Body) tetap dapat di-rebuild secara normal saat setState
       body: FadeTransition( 
         opacity: _fadeAnimation,
         child: SlideTransition(
@@ -396,7 +430,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
                 _buildActionButtons(),
                 const SizedBox(height: 16),
                 _buildSearchInput(),
-                // Tambahkan AnimatedBuilder untuk visual feedback refresh
                 AnimatedBuilder(
                   animation: _refreshFeedbackController,
                   builder: (context, child) {
@@ -419,8 +452,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
     );
   }
   
-  // ... (Widget _buildProcessFAB, _buildAutoInputCard, _buildManualInputCard, dll. tetap)
-  
   Widget _buildProcessFAB() {
     return AnimatedBuilder(
       animation: _processButtonController,
@@ -429,20 +460,19 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
           onPressed: _processAutomaticInput,
           backgroundColor: kAirlanggaColor,
           foregroundColor: Colors.white,
-          label: _isProcessing
+          icon: _isProcessing
               ? Transform.rotate(
                   angle: _processButtonController.value * 2.0 * pi,
                   child: const Icon(Icons.cached, color: Colors.white),
                 )
               : const Icon(Icons.settings),
-          icon: _isProcessing
+          label: _isProcessing
               ? const Text('Memproses...')
               : const Text('Proses Otomatis'),
         );
       },
     );
   }
-
 
   Widget _buildAutoInputCard() {
     return Card(
@@ -453,12 +483,15 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Input Otomatis', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text('Input Otomatis (boleh multi-line)',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             TextField(
               controller: _autoInputController,
+              minLines: 1,
+              maxLines: 8,
               decoration: const InputDecoration(
-                hintText: 'Contoh: Rina Safitri kelas 11 PPLG',
+                hintText: 'Contoh:\nRina Safitri kelas 10 PPLG\nBudi kelas 11 MPLB',
                 border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(10))),
                 isDense: true,
               ),
@@ -470,7 +503,9 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
   }
 
   Widget _buildManualInputCard() {
-    List<String> availableJurusan = _selectedSekolah != null ? kJurusanBySekolah[_selectedSekolah]! : [];
+    List<String> availableJurusan = _selectedSekolah != null && kJurusanBySekolah.containsKey(_selectedSekolah)
+        ? kJurusanBySekolah[_selectedSekolah]!
+        : [];
 
     return Card(
       elevation: 4,
@@ -561,6 +596,12 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
         Expanded(child: _buildActionButton(Icons.refresh, 'Segarkan', _loadData, Colors.orange)),
         const SizedBox(width: 8),
         Expanded(child: _buildActionButton(Icons.delete_forever, 'Hapus', _clearAllData, Colors.red)),
+        const SizedBox(width: 8),
+        // Tombol uji coba: muat 40 data
+        SizedBox(
+          width: 150,
+          child: _buildActionButton(Icons.bolt, 'Uji 40 Data', _loadDummyData, Colors.purple),
+        ),
       ],
     );
   }
@@ -576,7 +617,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
           isDense: true,
         ),
         onChanged: (value) {
-          // setState di sini memastikan _getGroupedData dipanggil ulang untuk filtering
           setState(() { 
             _searchQuery = value;
           });
@@ -586,7 +626,6 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
   }
 
   Widget _buildStatisticsLabel() {
-    // _updateStatistics() tidak perlu dipanggil di sini karena sudah dipanggil di setState
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Text(
@@ -644,7 +683,7 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
                     },
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      key: ValueKey<int>(jurusanData.length), // Key penting untuk AnimatedSwitcher
+                      key: ValueKey<int>(jurusanData.length),
                       children: jurusanData.entries.map((entryJurusan) {
                         final jurusan = entryJurusan.key;
                         final kelasData = entryJurusan.value;
@@ -690,5 +729,81 @@ class _DataParserScreenState extends State<DataParserScreen> with TickerProvider
 
   int _countStudentsInJurusan(Map<String, List<Student>> kelasData) {
     return kelasData.values.fold(0, (sum, list) => sum + list.length);
+  }
+  
+  void _showErrorSnackbar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.redAccent, behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  // --- Fungsi uji coba: muat 40 data contoh sekaligus ---
+  void _loadDummyData() {
+    const dummyInputs = [
+      "Rina Safitri kelas 10 PPLG",
+      "Budi Santoso kelas 11 MPLB",
+      "Salsa Nur Aini kelas 12 ALL",
+      "Reza Maulana kelas 11 DKV",
+      "Dewi Lestari kelas 10 FKK",
+      "Riko Pratama kelas 12 ALC",
+      "Andi Ramadhan kelas 11 TPM",
+      "Nisa Amalia kelas 10 PPLG",
+      "Yoga Saputra kelas 11 MPLB",
+      "Citra Ayu kelas 12 ALL",
+      "Rafli Hidayat kelas 10 DKV",
+      "Siti Rahma kelas 11 FKK",
+      "Fajar Nugraha kelas 12 ALC",
+      "Lutfi Ahmad kelas 10 TPM",
+      "Ayu Puspita kelas 11 PPLG",
+      "Hendra Wijaya kelas 12 MPLB",
+      "Fitri Handayani kelas 10 ALL",
+      "Ilham Firmansyah kelas 11 DKV",
+      "Maya Oktaviani kelas 12 FKK",
+      "Rio Alamsyah kelas 10 ALC",
+      "Putri Nabila kelas 11 TPM",
+      "Yudi Kurniawan kelas 12 PPLG",
+      "Laila Kusuma kelas 10 MPLB",
+      "Ardiansyah kelas 11 ALL",
+      "Melati Cahya kelas 12 DKV",
+      "Bagus Prasetyo kelas 10 FKK",
+      "Dian Rahayu kelas 11 ALC",
+      "Rizky Pramana kelas 12 TPM",
+      "Nadya Anjani kelas 10 PPLG",
+      "Galih Saputra kelas 11 MPLB",
+      "Sarah Amira kelas 12 ALL",
+      "Eko Setiawan kelas 10 DKV",
+      "Nurul Azizah kelas 11 FKK",
+      "Agus Salim kelas 12 ALC",
+      "Fina Kartika kelas 10 TPM",
+      "Bayu Aditya kelas 11 PPLG",
+      "Yulianti Sari kelas 12 MPLB",
+      "Hanif Ramdani kelas 10 ALL",
+      "Alya Putri kelas 11 DKV",
+      "Iqbal Maulana kelas 12 FKK",
+    ];
+
+    int added = 0;
+    for (var input in dummyInputs) {
+      final regex = RegExp(r'([\w\s.\-]+?)\s+kelas\s+(10|11|12)\s+([A-Za-z0-9]+)', caseSensitive: false);
+      final match = regex.firstMatch(input);
+      if (match != null) {
+        final nama = match.group(1)!.trim();
+        final kelas = match.group(2)!.trim();
+        final jurusan = match.group(3)!.toUpperCase().trim();
+        final sekolah = _findSekolahForJurusan(jurusan);
+        if (sekolah != null) {
+          _studentData.add(Student(nama: nama, kelas: kelas, jurusan: jurusan, sekolah: sekolah));
+          added++;
+        }
+      }
+    }
+
+    setState(() {
+      _updateStatistics();
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('✅ $added data uji coba berhasil dimuat!')),
+    );
   }
 }
